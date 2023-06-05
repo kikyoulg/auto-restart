@@ -1,11 +1,16 @@
+// autorestart_controller.go
+
 package controllers
 
 import (
 	"context"
-	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	corev1 "k8s.io/api/core/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -25,22 +30,30 @@ func (r *AutoRestartReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return reconcile.Result{}, err
 	}
 
-	// Only restart the associated Pod if it belongs to the "fedx-1000" namespace
-	if req.Namespace == "fedx-1000" {
-		// Get the corresponding Pod
-		pod := &corev1.Pod{}
-		err := r.Get(ctx, client.ObjectKey{Namespace: req.Namespace, Name: configMap.Name}, pod)
+	// Create a label selector for matching the associated Pod
+	labelSelector := labels.Set{
+		"app": "fedx-proxy",
+	}.AsSelector()
+
+	// Get the list of Pods matching the label selector and the ConfigMap's namespace
+	podList := &corev1.PodList{}
+	err = r.List(ctx, podList, client.InNamespace(req.Namespace), client.MatchingLabelsSelector{Selector: labelSelector})
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+
+	// Restart the associated Pods
+	for _, pod := range podList.Items {
+		// Add any additional logic here before restarting the Pod
+
+		// Set the owner reference of the Pod to the ConfigMap
+		err = controllerutil.SetControllerReference(configMap, &pod, r.Scheme)
 		if err != nil {
 			return reconcile.Result{}, err
 		}
 
-		// Update the Pod's restart timestamp annotation to trigger a restart
-		if pod.Annotations == nil {
-			pod.Annotations = make(map[string]string)
-		}
-		pod.Annotations["auto-restart-timestamp"] = "restart" // Update the timestamp to trigger a restart
-
-		err = r.Update(ctx, pod)
+		// Delete and recreate the Pod to trigger a restart
+		err = r.Delete(ctx, &pod)
 		if err != nil {
 			return reconcile.Result{}, err
 		}
