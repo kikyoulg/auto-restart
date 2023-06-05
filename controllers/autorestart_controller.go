@@ -1,87 +1,81 @@
+// autorestart_controller.go
+
 package controllers
 
 import (
 	"context"
-
+	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
-	appsv1 "fanjl/auto-restart/api/v1"
-	coreV1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 // AutoRestartReconciler reconciles a AutoRestart object
 type AutoRestartReconciler struct {
 	client.Client
+	Log    logr.Logger
 	Scheme *runtime.Scheme
 }
 
-//+kubebuilder:rbac:groups=apps.auto-restart,resources=autorestarts,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=apps.auto-restart,resources=autorestarts/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=apps.auto-restart,resources=autorestarts/finalizers,verbs=update
-//+kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;update
+// ...
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
+// Reconcile is the main reconciliation loop of the AutoRestart controller
 func (r *AutoRestartReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := log.FromContext(ctx)
+	log := r.Log.WithValues("autorestart", req.NamespacedName)
 
-	// Get the Autorestart resource
-	var autorestart appsv1.AutoRestart
-	err := r.Get(ctx, req.NamespacedName, &autorestart)
+	// Fetch the ConfigMap
+	configMap := &corev1.ConfigMap{}
+	err := r.Client.Get(ctx, req.NamespacedName, configMap)
 	if err != nil {
-		log.Error(err, "failed to get AutoRestart")
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		if errors.IsNotFound(err) {
+			// ConfigMap is deleted, do cleanup here if necessary
+			return reconcile.Result{}, nil
+		}
+		// Error occurred, requeue the request
+		return reconcile.Result{}, err
 	}
 
-	// Get all Pods in the fedx-1000 namespace
-	var pods coreV1.PodList
-	err = r.List(ctx, &pods, client.InNamespace("fedx-1000"))
-	if err != nil {
-		log.Error(err, "failed to list Pods")
-		return ctrl.Result{}, err
+	// Check if the ConfigMap belongs to the specified namespace
+	if configMap.Namespace != "fedx-1000" {
+		// ConfigMap is not in the target namespace, ignore it
+		return reconcile.Result{}, nil
 	}
 
-	// Check if any Pod's ConfigMap has been updated
-	for _, pod := range pods.Items {
-		for _, vol := range pod.Spec.Volumes {
-			if vol.ConfigMap != nil {
-				cm := &coreV1.ConfigMap{}
-				err := r.Get(ctx, types.NamespacedName{Name: vol.ConfigMap.Name, Namespace: pod.Namespace}, cm)
+	// ConfigMap has been updated, restart the corresponding Pod(s)
+	podList := &corev1.PodList{}
+	err = r.Client.List(ctx, podList, &client.ListOptions{Namespace: "fedx-1000"})
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+
+	for _, pod := range podList.Items {
+		// Check if the Pod references the ConfigMap
+		for _, volume := range pod.Spec.Volumes {
+			if volume.ConfigMap != nil && volume.ConfigMap.Name == configMap.Name {
+				// Restart the Pod by deleting it
+				err = r.Client.Delete(ctx, &pod)
 				if err != nil {
-					log.Error(err, "failed to get ConfigMap")
-					continue
+					return reconcile.Result{}, err
 				}
-				if controllerutil.ContainsFinalizer(&vol.ConfigMap.ObjectMeta, "auto-restart-finalizer") && !cm.ObjectMeta.GetDeletionTimestamp().IsZero() {
-					// The ConfigMap is being deleted, do nothing
-					continue
-				}
-				if cm.ObjectMeta.GetResourceVersion() != vol.ConfigMap.ResourceVersion {
-					// The ConfigMap has been updated, restart the Pod
-					log.Info("ConfigMap updated, restarting Pod", "Pod", pod.Name, "ConfigMap", cm.Name)
-					err = r.Delete(ctx, &pod)
-					if err != nil {
-						log.Error(err, "failed to delete Pod")
-						continue
-					}
-				}
+				log.Info("Pod restarted", "pod", pod.Name)
+				break
 			}
 		}
 	}
 
-	return ctrl.Result{}, nil
+	return reconcile.Result{}, nil
 }
 
-// SetupWithManager sets up the controller with the Manager.
+// ...
+
+// SetupWithManager sets up the controller with the Manager
 func (r *AutoRestartReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&appsv1.AutoRestart{}).
-		Watches(&source.Kind{Type: &coreV1.ConfigMap{}}, &handler.EnqueueRequestForObject{}).
+		For(&corev1.ConfigMap{}).
+		Owns(&corev1.Pod{}).
 		Complete(r)
 }
