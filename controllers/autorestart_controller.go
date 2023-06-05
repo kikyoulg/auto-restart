@@ -4,10 +4,12 @@ package controllers
 
 import (
 	"context"
+	"fmt"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -27,36 +29,49 @@ func (r *AutoRestartReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	configMap := &corev1.ConfigMap{}
 	err := r.Get(ctx, req.NamespacedName, configMap)
 	if err != nil {
+		if errors.IsNotFound(err) {
+			// ConfigMap has been deleted, no action needed
+			return reconcile.Result{}, nil
+		}
 		return reconcile.Result{}, err
 	}
 
-	// Create a label selector for matching the associated Pod
-	labelSelector := labels.Set{
-		"app": "fedx-proxy",
-	}.AsSelector()
+	// Check if the ConfigMap belongs to the desired namespace (fedx-1000)
+	if req.Namespace != "fedx-1000" {
+		// ConfigMap is not in the desired namespace, no action needed
+		return reconcile.Result{}, nil
+	}
 
-	// Get the list of Pods matching the label selector and the ConfigMap's namespace
+	// Get the label selector from the ConfigMap's labels
+	labelSelector := labels.SelectorFromSet(configMap.Labels)
+
+	// Get the list of Pods matching the label selector in the desired namespace
 	podList := &corev1.PodList{}
-	err = r.List(ctx, podList, client.InNamespace(req.Namespace), client.MatchingLabelsSelector{Selector: labelSelector})
+	listOpts := []client.ListOption{
+		client.InNamespace(req.Namespace),
+		client.MatchingLabelsSelector{Selector: labelSelector},
+	}
+	err = r.List(ctx, podList, listOpts...)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
 
 	// Restart the associated Pods
 	for _, pod := range podList.Items {
-		// Add any additional logic here before restarting the Pod
+		podName := pod.Name
+		podNamespace := pod.Namespace
 
-		// Set the owner reference of the Pod to the ConfigMap
-		err = controllerutil.SetControllerReference(configMap, &pod, r.Scheme)
+		// Execute restart logic here for the Pod
+		// ...
+
+		fmt.Printf("Restarting Pod %s in namespace %s\n", podName, podNamespace)
+		// Perform the Pod restart by deleting and recreating the Pod
+		err = r.Delete(ctx, &pod, client.PropagationPolicy(metav1.DeletePropagationBackground))
 		if err != nil {
 			return reconcile.Result{}, err
 		}
 
-		// Delete and recreate the Pod to trigger a restart
-		err = r.Delete(ctx, &pod)
-		if err != nil {
-			return reconcile.Result{}, err
-		}
+		// You can add any additional logic here after restarting the Pod
 	}
 
 	return reconcile.Result{}, nil
