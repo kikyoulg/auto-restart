@@ -1,0 +1,31 @@
+# permissions for end users to edit autorestarts.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: clusterrole
+    app.kubernetes.io/instance: autorestart-editor-role
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: auto-restart
+    app.kubernetes.io/part-of: auto-restart
+    app.kubernetes.io/managed-by: kustomize
+  name: autorestart-editor-role
+rules:
+- apiGroups:
+  - apps.auto-restart
+  resources:
+  - autorestarts
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps.auto-restart
+  resources:
+  - autorestarts/status
+  verbs:
+  - get
