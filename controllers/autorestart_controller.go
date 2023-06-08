@@ -1,84 +1,71 @@
-// autorestart_controller.go
-
 package controllers
 
 import (
 	"context"
 	"fmt"
-	"k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// AutoRestartReconciler reconciles a ConfigMap object
 type AutoRestartReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme           *runtime.Scheme
+	ProcessedConfigs map[string]string
 }
 
-//+kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;update
-//+kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;update
+// NewAutoRestartReconciler creates an instance of AutoRestartReconciler with initialization
+func NewAutoRestartReconciler(client client.Client, scheme *runtime.Scheme) *AutoRestartReconciler {
+	return &AutoRestartReconciler{
+		Client:           client,
+		Scheme:           scheme,
+		ProcessedConfigs: make(map[string]string),
+	}
+}
 
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
 func (r *AutoRestartReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	configMap := &corev1.ConfigMap{}
-	err := r.Get(ctx, req.NamespacedName, configMap)
-	if err != nil {
+	var configMap corev1.ConfigMap
+	if err := r.Get(ctx, req.NamespacedName, &configMap); err != nil {
 		if errors.IsNotFound(err) {
-			// ConfigMap has been deleted, no action needed
-			return reconcile.Result{}, nil
+			return ctrl.Result{}, nil
 		}
-		return reconcile.Result{}, err
+		return ctrl.Result{}, err
 	}
 
-	// Check if the ConfigMap belongs to the desired namespace (fedx-1000)
-	if req.Namespace != "fedx-1000" {
-		// ConfigMap is not in the desired namespace, no action needed
-		return reconcile.Result{}, nil
+	fmt.Printf("ConfigMap %s in namespace %s changed, ResourceVersion: %s\n", req.Name, req.Namespace, configMap.ObjectMeta.ResourceVersion)
+
+	configKey := fmt.Sprintf("%s/%s", configMap.Namespace, configMap.Name)
+	if val, ok := r.ProcessedConfigs[configKey]; ok && val == configMap.ObjectMeta.ResourceVersion {
+		return ctrl.Result{}, nil
 	}
+	r.ProcessedConfigs[configKey] = configMap.ObjectMeta.ResourceVersion
 
-	// Get the label selector from the ConfigMap's labels
-	labelSelector := labels.SelectorFromSet(configMap.Labels)
-
-	// Get the list of Pods matching the label selector in the desired namespace
+	// Find Pods which have the same ConfigMap volume mount
 	podList := &corev1.PodList{}
-	listOpts := []client.ListOption{
-		client.InNamespace(req.Namespace),
-		client.MatchingLabelsSelector{Selector: labelSelector},
-	}
-	err = r.List(ctx, podList, listOpts...)
-	if err != nil {
-		return reconcile.Result{}, err
+	if err := r.List(ctx, podList, client.InNamespace(req.Namespace)); err != nil {
+		return ctrl.Result{}, err
 	}
 
-	// Restart the associated Pods
 	for _, pod := range podList.Items {
-		podName := pod.Name
-		podNamespace := pod.Namespace
-
-		// Execute restart logic here for the Pod
-		// ...
-
-		fmt.Printf("Restarting Pod %s in namespace %s\n", podName, podNamespace)
-		// Perform the Pod restart by deleting and recreating the Pod
-		err = r.Delete(ctx, &pod, client.PropagationPolicy(metav1.DeletePropagationBackground))
-		if err != nil {
-			return reconcile.Result{}, err
+		for _, volume := range pod.Spec.Volumes {
+			if volume.ConfigMap != nil && volume.ConfigMap.Name == configMap.Name {
+				fmt.Printf("Restarting Pod %s in namespace %s\n", pod.Name, pod.Namespace)
+				if err := r.Delete(ctx, &pod); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
 		}
-
-		// You can add any additional logic here after restarting the Pod
 	}
 
-	return reconcile.Result{}, nil
+	return ctrl.Result{}, nil
 }
 
 func (r *AutoRestartReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.ConfigMap{}).
-		Complete(r)
+		Complete(NewAutoRestartReconciler(mgr.GetClient(), mgr.GetScheme()))
 }
