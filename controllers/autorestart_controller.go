@@ -1,71 +1,85 @@
+// autorestart_controller.go
+
 package controllers
 
 import (
 	"context"
 	"fmt"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 type AutoRestartReconciler struct {
 	client.Client
-	Scheme           *runtime.Scheme
-	ProcessedConfigs map[string]string
+	Scheme *runtime.Scheme
 }
 
-// NewAutoRestartReconciler creates an instance of AutoRestartReconciler with initialization
-func NewAutoRestartReconciler(client client.Client, scheme *runtime.Scheme) *AutoRestartReconciler {
-	return &AutoRestartReconciler{
-		Client:           client,
-		Scheme:           scheme,
-		ProcessedConfigs: make(map[string]string),
-	}
-}
-
-// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
 func (r *AutoRestartReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var configMap corev1.ConfigMap
-	if err := r.Get(ctx, req.NamespacedName, &configMap); err != nil {
-		if errors.IsNotFound(err) {
-			return ctrl.Result{}, nil
-		}
-		return ctrl.Result{}, err
+	//新建configMap对象，类型为指向 corev1.ConfigMap 结构体的指针,可以通过 corev1.ConfigMap{} 的字段来修改 ConfigMap 对象的键值对数据
+	configMap := &corev1.ConfigMap{}
+
+	/*
+		r.Get 方法的作用是从 Kubernetes API Server 中获取指定的资源对象，并将其存储到指定的变量中
+	*/
+	err := r.Get(ctx, req.NamespacedName, configMap)
+
+	//检查cm是否存在
+
+	//if err != nil {
+	//	if errors.IsNotFound(err) {
+	//		// ConfigMap has been deleted, no action needed
+	//		return reconcile.Result{}, nil
+	//	}
+	//	return reconcile.Result{}, err
+	//}
+
+	if req.Namespace != "fedx-1000" {
+		return reconcile.Result{}, nil
 	}
 
-	fmt.Printf("ConfigMap %s in namespace %s changed, ResourceVersion: %s\n", req.Name, req.Namespace, configMap.ObjectMeta.ResourceVersion)
+	labelSelector := labels.SelectorFromSet(configMap.Labels)
 
-	configKey := fmt.Sprintf("%s/%s", configMap.Namespace, configMap.Name)
-	if val, ok := r.ProcessedConfigs[configKey]; ok && val == configMap.ObjectMeta.ResourceVersion {
-		return ctrl.Result{}, nil
-	}
-	r.ProcessedConfigs[configKey] = configMap.ObjectMeta.ResourceVersion
-
-	// Find Pods which have the same ConfigMap volume mount
+	//声明corev1.PodList 类型的指针变量 podList
 	podList := &corev1.PodList{}
-	if err := r.List(ctx, podList, client.InNamespace(req.Namespace)); err != nil {
-		return ctrl.Result{}, err
+
+	//定义了一个 client.ListOption 类型的切片，该切片的名称为 listOpts
+	listOpts := []client.ListOption{
+		/*
+			client.InNamespace(req.Namespace)：只获取指定命名空间下的 Pod 资源对象
+			client.MatchingLabelsSelector{Selector: labelSelector}：只获取标签匹配指定选择器的 Pod 资源对象
+		*/
+		client.InNamespace(req.Namespace),
+		client.MatchingLabelsSelector{Selector: labelSelector},
+	}
+	//使用了 r.List 方法从 Kubernetes API Server 中获取指定选项的 Pod 资源对象列表，并将其存储到 podList 变量中
+	err = r.List(ctx, podList, listOpts...)
+	if err != nil {
+		return reconcile.Result{}, err
 	}
 
 	for _, pod := range podList.Items {
-		for _, volume := range pod.Spec.Volumes {
-			if volume.ConfigMap != nil && volume.ConfigMap.Name == configMap.Name {
-				fmt.Printf("Restarting Pod %s in namespace %s\n", pod.Name, pod.Namespace)
-				if err := r.Delete(ctx, &pod); err != nil {
-					return ctrl.Result{}, err
-				}
-			}
+		podName := pod.Name
+		podNamespace := pod.Namespace
+
+		fmt.Printf("Restarting Pod %s in namespace %s\n", podName, podNamespace)
+		//r.Delete 方法是 Kubernetes 客户端库中 client.Client 接口的一个方法，用于删除指定的 Kubernetes 资源对象
+		err = r.Delete(ctx, &pod, client.PropagationPolicy(metav1.DeletePropagationBackground))
+		if err != nil {
+			return reconcile.Result{}, err
 		}
 	}
 
-	return ctrl.Result{}, nil
+	return reconcile.Result{}, nil
 }
 
 func (r *AutoRestartReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.ConfigMap{}).
-		Complete(NewAutoRestartReconciler(mgr.GetClient(), mgr.GetScheme()))
+		Complete(r)
 }
