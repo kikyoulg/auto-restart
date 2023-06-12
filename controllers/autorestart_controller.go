@@ -20,12 +20,17 @@ type AutoRestartReconciler struct {
 	Scheme *runtime.Scheme
 }
 
+/*
+Reconcile方法带两参，ctx context.Context(package.Type),ctrl.Request表示控制器所关注的请求对象,其中包含了请求的名称和名称空间等信息
+*/
 func (r *AutoRestartReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	//新建configMap对象，类型为指向 corev1.ConfigMap 结构体的指针,可以通过 corev1.ConfigMap{} 的字段来修改 ConfigMap 对象的键值对数据
-	configMap := &corev1.ConfigMap{}
-
 	/*
-		r.Get 方法的作用是从 Kubernetes API Server 中获取指定的资源对象，并将其存储到指定的变量中
+		新建configMap对象，类型为指向 corev1.ConfigMap 结构体的指针,可以通过 corev1.ConfigMap{} 的字段来修改 ConfigMap 对象的键值对数据
+	*/
+	configMap := &corev1.ConfigMap{}
+	podList := &corev1.PodList{}
+	/*
+		r.Get 方法的作用是从 Kubernetes API Server 中获取NamespacedName，并将其存储configMap中
 	*/
 	err := r.Get(ctx, req.NamespacedName, configMap)
 
@@ -44,9 +49,6 @@ func (r *AutoRestartReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	labelSelector := labels.SelectorFromSet(configMap.Labels)
-
-	//声明corev1.PodList 类型的指针变量 podList
-	podList := &corev1.PodList{}
 
 	//定义了一个 client.ListOption 类型的切片，该切片的名称为 listOpts
 	listOpts := []client.ListOption{
